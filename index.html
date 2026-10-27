@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>Помоги Стасу убрать носки</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #2b2d42; font-family: system-ui, sans-serif; color: #fff; overflow: hidden; }
+  #wrap { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; }
+  canvas { background: #f4e9d8; border-radius: 12px; max-width: 100vw; max-height: 80vh; touch-action: none; box-shadow: 0 8px 30px #0008; }
+  #bar { margin-top: 10px; font-size: 14px; opacity: .85; text-align: center; padding: 0 12px; }
+  label { cursor: pointer; text-decoration: underline; }
+  input { display: none; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="c" width="800" height="560"></canvas>
+  <div id="bar">
+    Стрелки / WASD или тяни пальцем по экрану. Пробел / тап — начать.<br>
+    <label>Выбрать другое фото героини<input type="file" id="photo" accept="image/*"></label>
+  </div>
+</div>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const W = cv.width, H = cv.height;
+const GAME_TIME = 60;
+
+// --- Лицо героини: файл hero.png рядом с index.html (если нет — рисуется смайлик) ---
+let face = null;
+function loadFace(src) {
+  const img = new Image();
+  img.onload = () => { face = img; };
+  img.src = src;
+}
+loadFace('hero.png');
+let enemyFace = null;
+{ const img = new Image(); img.onload = () => { enemyFace = img; }; img.src = 'enemy.png'; }
+document.getElementById('photo').addEventListener('change', e => {
+  const f = e.target.files[0];
+  if (f) loadFace(URL.createObjectURL(f)); // остаётся только в браузере, никуда не отправляется
+});
+
+// --- Состояние ---
+let state = 'menu'; // menu | play | over
+let hero, enemy, hit, flash, socks, score, timeLeft, best = +(localStorage.getItem('socksBest') || 0);
+const keys = {};
+let target = null; // цель при управлении касанием
+
+const COLORS = ['#e63946', '#2a9d8f', '#f4a261', '#6a4c93', '#1d3557', '#ffb703'];
+
+function reset() {
+  hero = { x: W / 2, y: H / 2, r: 30, speed: 260, dir: 1 };
+  enemy = { x: W - 80, y: H - 80, r: 34, speed: 120 };
+  hit = 0; flash = 0;
+  socks = [];
+  for (let i = 0; i < 12; i++) spawnSock();
+  score = 0; timeLeft = GAME_TIME;
+}
+function spawnSock() {
+  let x, y;
+  do { x = 40 + Math.random() * (W - 80); y = 70 + Math.random() * (H - 110); }
+  while (Math.hypot(x - hero.x, y - hero.y) < 90);
+  socks.push({ x, y, rot: (Math.random() - .5) * 1.6, c: COLORS[Math.floor(Math.random() * COLORS.length)] });
+}
+
+addEventListener('keydown', e => {
+  keys[e.key.toLowerCase()] = true;
+  if (e.key === ' ' && state !== 'play') start();
+  if (e.key.startsWith('Arrow') || e.key === ' ') e.preventDefault();
+});
+addEventListener('keyup', e => keys[e.key.toLowerCase()] = false);
+
+function pos(e) {
+  const r = cv.getBoundingClientRect();
+  const t = e.touches ? e.touches[0] : e;
+  return { x: (t.clientX - r.left) * W / r.width, y: (t.clientY - r.top) * H / r.height };
+}
+cv.addEventListener('pointerdown', e => { if (state !== 'play') { start(); return; } target = pos(e); });
+cv.addEventListener('pointermove', e => { if (e.buttons || e.pointerType === 'touch') target = pos(e); });
+addEventListener('pointerup', () => target = null);
+
+function start() { reset(); state = 'play'; last = performance.now(); }
+
+// --- Логика ---
+function update(dt) {
+  let dx = 0, dy = 0;
+  if (keys['arrowleft'] || keys['a'] || keys['ф']) dx -= 1;
+  if (keys['arrowright'] || keys['d'] || keys['в']) dx += 1;
+  if (keys['arrowup'] || keys['w'] || keys['ц']) dy -= 1;
+  if (keys['arrowdown'] || keys['s'] || keys['ы']) dy += 1;
+  if (target && !dx && !dy) {
+    const d = Math.hypot(target.x - hero.x, target.y - hero.y);
+    if (d > 8) { dx = (target.x - hero.x) / d; dy = (target.y - hero.y) / d; }
+  }
+  const len = Math.hypot(dx, dy) || 1;
+  hero.x = Math.max(hero.r, Math.min(W - hero.r, hero.x + dx / len * hero.speed * dt));
+  hero.y = Math.max(hero.r + 40, Math.min(H - hero.r, hero.y + dy / len * hero.speed * dt));
+  if (dx) hero.dir = dx > 0 ? 1 : -1;
+
+  for (let i = socks.length - 1; i >= 0; i--) {
+    if (Math.hypot(socks[i].x - hero.x, socks[i].y - hero.y) < hero.r + 18) {
+      socks.splice(i, 1); score++; spawnSock();
+    }
+  }
+  // Муж гонится за героиней, ускоряясь со временем, и подбирает свои носки по пути
+  enemy.speed = 120 + (GAME_TIME - timeLeft) * 1.6;
+  const ed = Math.hypot(hero.x - enemy.x, hero.y - enemy.y) || 1;
+  enemy.x += (hero.x - enemy.x) / ed * enemy.speed * dt;
+  enemy.y += (hero.y - enemy.y) / ed * enemy.speed * dt;
+  for (let i = socks.length - 1; i >= 0; i--) {
+    if (Math.hypot(socks[i].x - enemy.x, socks[i].y - enemy.y) < enemy.r + 10) {
+      socks.splice(i, 1); spawnSock();
+    }
+  }
+  hit = Math.max(0, hit - dt); flash = Math.max(0, flash - dt);
+  if (!hit && ed < hero.r + enemy.r - 8) {
+    timeLeft -= 5; score = Math.max(0, score - 2); hit = 1.5; flash = .3;
+    hero.x -= (enemy.x - hero.x) / ed * 90; hero.y -= (enemy.y - hero.y) / ed * 90;
+    hero.x = Math.max(hero.r, Math.min(W - hero.r, hero.x));
+    hero.y = Math.max(hero.r + 40, Math.min(H - hero.r, hero.y));
+  }
+  timeLeft -= dt;
+  if (timeLeft <= 0) {
+    timeLeft = 0; state = 'over';
+    if (score > best) { best = score; try { localStorage.setItem('socksBest', best); } catch (e) {} }
+  }
+}
+
+// --- Отрисовка ---
+function drawSock(s) {
+  ctx.save(); ctx.translate(s.x, s.y); ctx.rotate(s.rot);
+  ctx.fillStyle = s.c;
+  ctx.beginPath();
+  ctx.moveTo(-8, -18); ctx.lineTo(8, -18); ctx.lineTo(8, 4);
+  ctx.quadraticCurveTo(8, 10, 18, 12);
+  ctx.quadraticCurveTo(22, 20, 12, 20);
+  ctx.lineTo(-8, 20); ctx.quadraticCurveTo(-10, 20, -10, 12); ctx.lineTo(-8, -18);
+  ctx.fill();
+  ctx.fillStyle = '#fff'; ctx.fillRect(-8, -18, 16, 6); // манжета
+  ctx.restore();
+}
+function drawHero() {
+  const { x, y, dir } = hero;
+  const bob = Math.sin(performance.now() / 90) * ((keys.a||keys.d||keys.w||keys.s||target) ? 2 : 0);
+  ctx.save(); ctx.translate(x, y + bob);
+  // тень
+  ctx.fillStyle = '#0002'; ctx.beginPath(); ctx.ellipse(0, 34, 22, 7, 0, 0, 7); ctx.fill();
+  // ноги
+  ctx.fillStyle = '#3d405b'; ctx.fillRect(-10, 16, 8, 18); ctx.fillRect(2, 16, 8, 18);
+  // платье
+  ctx.fillStyle = '#e07a9b';
+  ctx.beginPath(); ctx.moveTo(-9, 0); ctx.lineTo(9, 0); ctx.lineTo(18, 24); ctx.lineTo(-18, 24); ctx.fill();
+  // руки
+  ctx.strokeStyle = '#f1c9a5'; ctx.lineWidth = 5; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(-9, 4); ctx.lineTo(-18, 16); ctx.moveTo(9, 4); ctx.lineTo(18, 16); ctx.stroke();
+  // голова
+  ctx.save(); ctx.translate(0, -18);
+  ctx.beginPath(); ctx.arc(0, 0, 24, 0, 7); ctx.clip();
+  if (face) {
+    const s = Math.min(face.width, face.height);
+    ctx.drawImage(face, (face.width - s) / 2, (face.height - s) / 2, s, s, -24, -24, 48, 48);
+  } else {
+    ctx.fillStyle = '#f1c9a5'; ctx.fillRect(-24, -24, 48, 48);
+    ctx.fillStyle = '#6b3f2a'; ctx.fillRect(-24, -24, 48, 16);
+    ctx.fillStyle = '#222'; ctx.beginPath(); ctx.arc(8, -2, 3, 0, 7); ctx.moveTo(-5, -2); ctx.arc(-8, -2, 3, 0, 7); ctx.fill();
+    ctx.strokeStyle = '#a33'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(0, 6, 7, .2, Math.PI - .2); ctx.stroke();
+  }
+  ctx.restore();
+  ctx.strokeStyle = '#fff'; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(0, -18, 24, 0, 7); ctx.stroke();
+  ctx.restore();
+}
+function drawEnemy() {
+  const { x, y, r } = enemy;
+  ctx.save(); ctx.translate(x, y);
+  ctx.fillStyle = '#0002'; ctx.beginPath(); ctx.ellipse(0, 40, 26, 8, 0, 0, 7); ctx.fill();
+  ctx.fillStyle = '#3d405b'; ctx.fillRect(-12, 20, 10, 20); ctx.fillRect(2, 20, 10, 20);
+  ctx.fillStyle = '#457b9d'; ctx.fillRect(-18, 0, 36, 24); // футболка
+  ctx.strokeStyle = '#f1c9a5'; ctx.lineWidth = 6; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(-18, 4); ctx.lineTo(-30, 18); ctx.moveTo(18, 4); ctx.lineTo(30, 18); ctx.stroke();
+  ctx.save(); ctx.translate(0, -20);
+  ctx.beginPath(); ctx.arc(0, 0, r, 0, 7); ctx.clip();
+  if (enemyFace) ctx.drawImage(enemyFace, -r, -r, r * 2, r * 2);
+  else { ctx.fillStyle = '#c99'; ctx.fillRect(-r, -r, r * 2, r * 2); }
+  ctx.restore();
+  ctx.strokeStyle = '#c1121f'; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(0, -20, r, 0, 7); ctx.stroke();
+  ctx.restore();
+}
+function text(t, x, y, size, align = 'center', color = '#2b2d42') {
+  ctx.fillStyle = color; ctx.font = `bold ${size}px system-ui, sans-serif`; ctx.textAlign = align; ctx.fillText(t, x, y);
+}
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  // пол
+  ctx.fillStyle = '#e9d8bd';
+  for (let i = 0; i < W; i += 80) ctx.fillRect(i, 40, 40, H);
+  // панель
+  ctx.fillStyle = '#2b2d42'; ctx.fillRect(0, 0, W, 40);
+  if (state !== 'menu') {
+    text('Носков: ' + score, 14, 27, 20, 'left', '#fff');
+    text('⏱ ' + Math.ceil(timeLeft), W - 14, 27, 20, 'right', timeLeft < 10 ? '#ff6b6b' : '#fff');
+    socks.forEach(drawSock);
+    if (hit && Math.floor(hit * 10) % 2) ctx.globalAlpha = .4; // мигание после столкновения
+    drawHero();
+    ctx.globalAlpha = 1;
+    drawEnemy();
+    if (flash) { ctx.fillStyle = `rgba(200,0,0,${flash})`; ctx.fillRect(0, 40, W, H); }
+  }
+  if (state === 'menu') {
+    hero = hero || { x: W / 2, y: H / 2 + 20, r: 30, dir: 1 };
+    drawHero();
+    text('Помоги Стасу убрать носки', W / 2, 150, 46);
+    text('За 60 секунд собери как можно больше носков', W / 2, 190, 20);
+    text('Это мужа носки — убегай от него! Поймает: −5 сек и −2 носка', W / 2, 225, 18);
+    text('Нажми пробел или коснись экрана', W / 2, 400, 24);
+  }
+  if (state === 'over') {
+    ctx.fillStyle = '#000a'; ctx.fillRect(0, 40, W, H);
+    text('Время вышло!', W / 2, 200, 48, 'center', '#fff');
+    text('Собрано носков: ' + score, W / 2, 260, 28, 'center', '#fff');
+    text('Рекорд: ' + best, W / 2, 300, 22, 'center', '#ffd166');
+    text('Пробел или тап — ещё раз', W / 2, 370, 22, 'center', '#fff');
+  }
+}
+
+let last = performance.now();
+function loop(now) {
+  const dt = Math.min(.05, (now - last) / 1000); last = now;
+  if (state === 'play') update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+reset(); state = 'menu';
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
